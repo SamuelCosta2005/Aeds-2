@@ -1,0 +1,485 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#define MAX_GAMES 1850
+#define MAX_LINE 10000
+#define HASH_TABLE_SIZE 21
+
+typedef struct {
+    char *tempData;
+    int dia;
+    int mes;
+    int ano;
+} Data;
+
+typedef struct {
+    int appid;
+    char *name;
+    char *releaseDate;
+    Data data;
+    int estimatedOwners;
+    float price;
+    char **supportedLanguages;
+    int supportedLanguagesCount;
+    int metacriticScore;
+    float userScore;
+    int achievements;
+    char **publishers;
+    int publishersCount;
+    char **developers;
+    int developersCount;
+    char **categories;
+    int categoriesCount;
+    char **genres;
+    int genresCount;
+    char **tags;
+    int tagsCount;
+} Game;
+
+static char *strdup_m(const char *s) {
+    char *r = NULL;
+    if (s) {
+        int len = (int)strlen(s);
+        r = (char *)malloc(len + 1);
+        for (int i = 0; i < len; i++) r[i] = s[i];
+        r[len] = '\0';
+    } else {
+        r = (char *)malloc(1);
+        r[0] = '\0';
+    }
+    return r;
+}
+
+static void rstrip_m(char *s) {
+    if (s) {
+        int n = (int)strlen(s);
+        while (n > 0 && (s[n-1] == '\n' || s[n-1] == '\r')) {
+            s[n-1] = '\0';
+            n--;
+        }
+    }
+}
+
+static char *trim_m(char *s) {
+    char *res = NULL;
+    if (s) {
+        int start = 0;
+        int end = (int)strlen(s) - 1;
+        while (isspace((unsigned char)s[start])) start++;
+        while (end >= start && isspace((unsigned char)s[end])) end--;
+        int len = end - start + 1;
+        res = (char *)malloc(len + 1);
+        for (int i = 0; i < len; i++) res[i] = s[start + i];
+        res[len] = '\0';
+    } else {
+        res = strdup_m("");
+    }
+    return res;
+}
+
+static char *strip_quotes_m(char *s) {
+    char *res = NULL;
+    if (s) {
+        int len = (int)strlen(s);
+        if (len >= 2 && s[0] == '"' && s[len-1] == '"') {
+            res = (char *)malloc(len - 1);
+            for (int i = 1; i < len - 1; i++) res[i-1] = s[i];
+            res[len-2] = '\0';
+        } else {
+            res = strdup_m(s);
+        }
+    } else {
+        res = strdup_m("");
+    }
+    return res;
+}
+
+static char **split_csv_line_m(const char *line, int *count) {
+    char **parts = NULL;
+    int cap = 0, cnt = 0;
+    int len = (int)strlen(line);
+    char *buf = strdup_m(line);
+    int start = 0;
+    int in_quotes = 0;
+    for (int i = 0; i <= len; i++) {
+        char c = (i < len) ? buf[i] : '\0';
+        if (c == '"') in_quotes = !in_quotes;
+        if ((c == ',' && !in_quotes) || c == '\0') {
+            int piece_len = i - start;
+            char *piece = (char *)malloc(piece_len + 1);
+            for (int j = 0; j < piece_len; j++) piece[j] = buf[start + j];
+            piece[piece_len] = '\0';
+            if (cnt >= cap) {
+                cap = (cap == 0) ? 8 : cap * 2;
+                parts = (char **)realloc(parts, sizeof(char*) * cap);
+            }
+            parts[cnt++] = piece;
+            start = i + 1;
+        }
+    }
+    free(buf);
+    *count = cnt;
+    return parts;
+}
+
+static char **split_simple_comma_m(const char *s, int *count) {
+    char **arr = NULL;
+    int cap = 0, cnt = 0;
+    int start = 0;
+    int len = (int)strlen(s);
+    for (int i = 0; i <= len; i++) {
+        if (s[i] == ',' || s[i] == '\0') {
+            int piece_len = i - start;
+            char *tmp = (char *)malloc(piece_len + 1);
+            for (int j = 0; j < piece_len; j++) tmp[j] = s[start + j];
+            tmp[piece_len] = '\0';
+            char *trimmed = trim_m(tmp);
+            free(tmp);
+            if (cnt >= cap) {
+                cap = (cap == 0) ? 8 : cap * 2;
+                arr = (char **)realloc(arr, sizeof(char*) * cap);
+            }
+            arr[cnt++] = trimmed;
+            start = i + 1;
+        }
+    }
+    *count = cnt;
+    return arr;
+}
+
+static char **stringToArray_m(const char *string, int *outCount) {
+    char **arr = NULL;
+    int L = (int)strlen(string);
+    if (L < 4) {
+        *outCount = 0;
+        return NULL;
+    }
+    int start = 2;
+    int end = L - 2;
+    int sublen = end - start;
+    char *sub = (char *)malloc(sublen + 1);
+    for (int i = 0; i < sublen; i++) sub[i] = string[start + i];
+    sub[sublen] = '\0';
+    arr = split_simple_comma_m(sub, outCount);
+    free(sub);
+    return arr;
+}
+
+static void free_string_array_m(char **arr, int count) {
+    if (arr) {
+        for (int i = 0; i < count; i++) if (arr[i]) free(arr[i]);
+        free(arr);
+    }
+}
+
+static void Data_parse_m(Data *d) {
+    d->dia = d->mes = d->ano = 0;
+    if (!d->tempData) return;
+    int L = (int)strlen(d->tempData);
+    if (L == 0) return;
+    char *copy = strdup_m(d->tempData);
+    if (copy[0] == '"') {
+        for (int i = 0; i < L-2; i++) copy[i] = copy[i+1];
+        copy[L-2] = '\0';
+    }
+    char monthTok[16] = {0}, dayTok[16] = {0}, yearTok[16] = {0};
+    int idx = 0, tok_idx = 0, field = 0;
+    for (int i = 0; ; i++) {
+        char c = copy[i];
+        if (c == ' ' || c == '\0') {
+            if (field == 0) { monthTok[tok_idx] = '\0'; field++; }
+            else if (field == 1) { dayTok[tok_idx] = '\0'; field++; }
+            else if (field == 2) { yearTok[tok_idx] = '\0'; break; }
+            tok_idx = 0;
+        } else {
+            if (field == 0) monthTok[tok_idx++] = c;
+            else if (field == 1) dayTok[tok_idx++] = c;
+            else if (field == 2) yearTok[tok_idx++] = c;
+        }
+        if (c == '\0') break;
+    }
+    char *comma = strchr(dayTok, ',');
+    if (comma) *comma = '\0';
+    d->dia = atoi(dayTok);
+    d->ano = atoi(yearTok);
+    if (strcmp(monthTok, "Jan") == 0) d->mes = 1;
+    else if (strcmp(monthTok, "Feb") == 0) d->mes = 2;
+    else if (strcmp(monthTok, "Mar") == 0) d->mes = 3;
+    else if (strcmp(monthTok, "Apr") == 0) d->mes = 4;
+    else if (strcmp(monthTok, "May") == 0) d->mes = 5;
+    else if (strcmp(monthTok, "Jun") == 0) d->mes = 6;
+    else if (strcmp(monthTok, "Jul") == 0) d->mes = 7;
+    else if (strcmp(monthTok, "Aug") == 0) d->mes = 8;
+    else if (strcmp(monthTok, "Sep") == 0) d->mes = 9;
+    else if (strcmp(monthTok, "Oct") == 0) d->mes = 10;
+    else if (strcmp(monthTok, "Nov") == 0) d->mes = 11;
+    else if (strcmp(monthTok, "Dec") == 0) d->mes = 12;
+    else d->mes = 1;
+    free(copy);
+}
+
+static Game *newGameFromParts_m(char **parts, int partsCount) {
+    Game *g = (Game *)calloc(1, sizeof(Game));
+    g->appid = atoi(parts[0]);
+    g->name = strip_quotes_m(parts[1]);
+    g->releaseDate = strdup_m(parts[2]);
+    g->data.tempData = g->releaseDate;
+    Data_parse_m(&g->data);
+    g->estimatedOwners = atoi(parts[3]);
+    g->price = (float)strtod(parts[4], NULL);
+    g->supportedLanguages = stringToArray_m(parts[5], &g->supportedLanguagesCount);
+    g->metacriticScore = atoi(parts[6]);
+    g->userScore = (float)strtod(parts[7], NULL);
+    g->achievements = atoi(parts[8]);
+    g->publishers = stringToArray_m(parts[9], &g->publishersCount);
+    g->developers = stringToArray_m(parts[10], &g->developersCount);
+    g->categories = stringToArray_m(parts[11], &g->categoriesCount);
+    g->genres = stringToArray_m(parts[12], &g->genresCount);
+    g->tags = stringToArray_m(parts[13], &g->tagsCount);
+    return g;
+}
+
+static void freeGame_m(Game *g) {
+    if (!g) return;
+    if (g->name) free(g->name);
+    if (g->releaseDate) free(g->releaseDate);
+    free_string_array_m(g->supportedLanguages, g->supportedLanguagesCount);
+    free_string_array_m(g->publishers, g->publishersCount);
+    free_string_array_m(g->developers, g->developersCount);
+    free_string_array_m(g->categories, g->categoriesCount);
+    free_string_array_m(g->genres, g->genresCount);
+    free_string_array_m(g->tags, g->tagsCount);
+    free(g);
+}
+
+static void printGame_m(const Game *g) {
+    printf("=> %d ", g->appid);
+    printf("## %s ", g->name);
+    printf("## %02d/%02d/%d ", g->data.dia, g->data.mes, g->data.ano);
+    printf("## %d ", g->estimatedOwners);
+    printf("## %g ", g->price);
+
+    printf("## [");
+    for (int i = 0; i < g->supportedLanguagesCount; i++) {
+        printf("%s", g->supportedLanguages[i]);
+        if (i < g->supportedLanguagesCount - 1) printf(", ");
+    }
+    printf("] ");
+
+    printf("## %d ", g->metacriticScore);
+    printf("## %g ", g->userScore);
+    printf("## %d ", g->achievements);
+
+    char **arrs[] = { g->publishers, g->developers, g->categories, g->genres, g->tags };
+    int counts[] = { g->publishersCount, g->developersCount, g->categoriesCount, g->genresCount, g->tagsCount };
+
+    for (int j = 0; j < 5; j++) {
+        printf("## [");
+        for (int i = 0; i < counts[j]; i++) {
+            printf("%s", arrs[j][i]);
+            if (i < counts[j]-1) printf(", ");
+        }
+        printf("] ");
+    }
+
+    printf("##\n");
+}
+
+static Game *games[MAX_GAMES];
+
+static void readCSV_m(const char *path, int *outCount) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror("Erro ao abrir CSV"); *outCount = 0; return; }
+    char line[MAX_LINE];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); *outCount = 0; return; }
+    int idx = 0;
+    while (fgets(line, sizeof(line), f) && idx < MAX_GAMES) {
+        rstrip_m(line);
+        int partsCnt = 0;
+        char **parts = split_csv_line_m(line, &partsCnt);
+        if (partsCnt < 14) {
+            parts = (char **)realloc(parts, sizeof(char*) * 14);
+            for (int k = partsCnt; k < 14; k++) parts[k] = strdup_m("");
+            partsCnt = 14;
+        }
+        Game *g = newGameFromParts_m(parts, partsCnt);
+        games[idx++] = g;
+        for (int k = 0; k < partsCnt; k++) free(parts[k]);
+        free(parts);
+    }
+    fclose(f);
+    *outCount = idx;
+}
+
+// ===== ESTRUTURAS DA TABELA HASH =====
+
+typedef struct HashNode {
+    Game *game;
+    struct HashNode *next;
+} HashNode;
+
+typedef struct {
+    HashNode **table;
+    int size;
+} HashTable;
+
+// ===== FUNÇÕES DA TABELA HASH =====
+
+// Função hash: soma dos valores ASCII do nome modulo tamanho da tabela
+static int hashFunction(const char *name) {
+    int sum = 0;
+    for (int i = 0; name[i] != '\0'; i++) {
+        sum += (int)name[i];
+    }
+    return sum % HASH_TABLE_SIZE;
+}
+
+// Cria e inicializa uma tabela hash
+static HashTable *createHashTable() {
+    HashTable *ht = (HashTable *)malloc(sizeof(HashTable));
+    ht->size = HASH_TABLE_SIZE;
+    ht->table = (HashNode **)calloc(HASH_TABLE_SIZE, sizeof(HashNode *));
+    return ht;
+}
+
+// Insere um jogo na tabela hash
+static void insertIntoHashTable(HashTable *ht, Game *game) {
+    if (!ht || !game) return;
+    
+    int index = hashFunction(game->name);
+    
+    // Cria novo nó
+    HashNode *newNode = (HashNode *)malloc(sizeof(HashNode));
+    newNode->game = game;
+    newNode->next = NULL;
+    
+    // Insere no início da lista (tratamento de colisão por lista encadeada)
+    if (ht->table[index] == NULL) {
+        ht->table[index] = newNode;
+    } else {
+        // Colisão - insere no início da lista
+        newNode->next = ht->table[index];
+        ht->table[index] = newNode;
+    }
+}
+
+// Pesquisa um jogo pelo nome na tabela hash
+static void searchInHashTable(HashTable *ht, const char *name) {
+    if (!ht || !name) return;
+    
+    int index = hashFunction(name);
+    int found = 0;
+    
+    // Remove aspas extras se existirem
+    char *cleanName = strip_quotes_m((char*)name);
+    
+    // Percorre a lista encadeada na posição index
+    HashNode *current = ht->table[index];
+    while (current != NULL) {
+        // Remove aspas do nome no jogo também para comparação
+        char *gameCleanName = strip_quotes_m(current->game->name);
+        
+        if (strcmp(gameCleanName, cleanName) == 0) {
+            found = 1;
+            free(gameCleanName);
+            break;
+        }
+        free(gameCleanName);
+        current = current->next;
+    }
+    
+    // Imprime no formato solicitado
+    printf("%s (Posicao: %d) ", cleanName, index);
+    if (found) {
+        printf("SIM\n");
+    } else {
+        printf("NAO\n");
+    }
+    
+    free(cleanName);
+}
+
+// Libera a memória da tabela hash
+static void freeHashTable(HashTable *ht, int freeGames) {
+    if (!ht) return;
+    
+    for (int i = 0; i < ht->size; i++) {
+        HashNode *current = ht->table[i];
+        while (current != NULL) {
+            HashNode *temp = current;
+            current = current->next;
+            if (freeGames) {
+                freeGame_m(temp->game);
+            }
+            free(temp);
+        }
+    }
+    free(ht->table);
+    free(ht);
+}
+
+// ===== FUNÇÃO PRINCIPAL MODIFICADA =====
+
+int main(void) {
+    int numGames = 0;
+    readCSV_m("/tmp/games.csv", &numGames);
+    
+    char input[256];
+    
+    // FASE 1: Ler IDs e criar tabela hash com jogos específicos
+    HashTable *hashTable = createHashTable();
+    
+    while (1) {
+        fgets(input, sizeof(input), stdin);
+        rstrip_m(input);
+        
+        if (strcmp(input, "FIM") == 0) {
+            break;
+        }
+        
+        int id = atoi(input);
+        
+        // Procura o jogo pelo ID e insere na tabela hash
+        for (int i = 0; i < numGames; i++) {
+            if (games[i]->appid == id) {
+                insertIntoHashTable(hashTable, games[i]);
+                break;
+            }
+        }
+    }
+    
+    // FASE 2: Pesquisar nomes na tabela hash
+    while (fgets(input, sizeof(input), stdin)) {
+        rstrip_m(input);
+        
+        if (strcmp(input, "FIM") == 0) {
+            break;
+        }
+        
+        // Pesquisa o nome na tabela hash
+        searchInHashTable(hashTable, input);
+    }
+    
+    // Limpeza
+    // Não liberamos os jogos aqui pois eles ainda estão no array games
+    // Apenas liberamos a estrutura da tabela hash
+    for (int i = 0; i < hashTable->size; i++) {
+        HashNode *current = hashTable->table[i];
+        while (current != NULL) {
+            HashNode *temp = current;
+            current = current->next;
+            free(temp);
+        }
+    }
+    free(hashTable->table);
+    free(hashTable);
+    
+    // Libera todos os jogos do array original
+    for (int i = 0; i < numGames; i++) {
+        freeGame_m(games[i]);
+    }
+    
+    return 0;
+}
